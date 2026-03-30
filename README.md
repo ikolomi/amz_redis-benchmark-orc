@@ -49,7 +49,6 @@ python generate_server_graphs.py results/server-benchmark/2026-03-23T20:00:00/
 ```bash
 # Edit the matrix config
 cp configs/examples/matrix-scalability.json my-matrix.json
-vim my-matrix.json
 
 # Dry run
 python run_server_matrix.py --matrix my-matrix.json --dry-run
