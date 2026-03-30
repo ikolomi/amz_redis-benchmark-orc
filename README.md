@@ -33,7 +33,6 @@ Three-layer architecture:
 ```bash
 # Edit the config with your server binary paths
 cp configs/examples/matrix-scalability.json my-experiment.json
-vim my-experiment.json
 
 # Dry run — see what would happen
 python orchestrator.py --config my-experiment.json --dry-run
@@ -68,6 +67,10 @@ python generate_server_graphs.py results/server-matrix/2026-03-23T20:00:00/
 
 Used directly by `orchestrator.py`. Defines a complete benchmark experiment.
 
+Servers can be **local** (orchestrator manages the server lifecycle) or **remote** (pre-existing external server). Each server entry must have exactly one of `local-server-info` or `remote-server-info`.
+
+#### Local Server Example
+
 ```json
 {
     "description": "Valkey 8.1 vs 9.0 regression test",
@@ -76,13 +79,17 @@ Used directly by `orchestrator.py`. Defines a complete benchmark experiment.
     "servers": [
         {
             "name": "valkey-8.1-oss",
-            "binary": "/opt/valkey/8.1/bin/valkey-server",
-            "args": ["--save", "", "--appendonly", "no", "--protected-mode", "no"]
+            "local-server-info": {
+                "binary": "/opt/valkey/8.1/bin/valkey-server",
+                "args": ["--save", "", "--appendonly", "no", "--protected-mode", "no"]
+            }
         },
         {
             "name": "valkey-9.0-elasticache",
-            "binary": "/opt/valkey/9.0-ec/bin/valkey-server",
-            "args": ["--save", "", "--appendonly", "no", "--protected-mode", "no"]
+            "local-server-info": {
+                "binary": "/opt/valkey/9.0-ec/bin/valkey-server",
+                "args": ["--save", "", "--appendonly", "no", "--protected-mode", "no"]
+            }
         }
     ],
 
@@ -114,14 +121,80 @@ Used directly by `orchestrator.py`. Defines a complete benchmark experiment.
 }
 ```
 
+#### Remote (External) Server Example
+
+```json
+{
+    "description": "Benchmark against a remote Valkey server",
+    "iterations": 3,
+
+    "servers": [
+        {
+            "name": "remote-valkey",
+            "remote-server-info": {
+                "endpoint": "my-valkey-server.example.com",
+                "port": 6379
+            }
+        }
+    ],
+
+    "amz_valkey_benchmark_binary": "/usr/local/bin/amz_valkey-benchmark",
+    "output_directory": "./results/remote-benchmark",
+
+    "experiment_duration_seconds": 120,
+    "warmup_skip_seconds": 5,
+    "port": 6379,
+
+    "keyspace": {
+        "key_count": 100000,
+        "data_size_bytes": 512,
+        "seed": 100000
+    },
+
+    "clients": {
+        "max_connections_per_benchmark_process": 50,
+        "set_clients": 10,
+        "get_clients": 40
+    }
+}
+```
+
+#### Mixed Local + Remote Example
+
+You can mix local and remote servers in the same experiment to compare them directly:
+
+```json
+{
+    "servers": [
+        {
+            "name": "local-valkey-8.1",
+            "local-server-info": {
+                "binary": "/opt/valkey/8.1/bin/valkey-server",
+                "args": ["--save", "", "--appendonly", "no"]
+            }
+        },
+        {
+            "name": "remote-production",
+            "remote-server-info": {
+                "endpoint": "my-valkey-server.example.com",
+                "port": 6379
+            }
+        }
+    ],
+    "servers_directory": "/tmp/valkey-bench-servers"
+}
+```
+
 **Key fields:**
 
 | Field | Description |
 |-------|-------------|
-| `servers[].name` | Unique label for the server binary (used in output and graphs) |
-| `servers[].binary` | Absolute path to the valkey-server binary |
-| `servers[].args` | Additional CLI args (port is added automatically) |
-| `servers_directory` | Temp directory for isolated server copies |
+| `servers[].name` | Unique label for the server (used in output and graphs) |
+| `servers[].local-server-info.binary` | Path to the valkey-server binary (local servers) |
+| `servers[].local-server-info.args` | Additional CLI args for the server (port is added automatically) |
+| `servers[].remote-server-info.endpoint` | DNS name or IP of a remote Redis/Valkey server |
+| `servers[].remote-server-info.port` | Port of the remote server (default: 6379) |
+| `servers_directory` | Temp directory for isolated server copies (required only for local servers) |
 | `amz_valkey_benchmark_binary` | Absolute path to the amz_valkey-benchmark binary |
 | `experiment_duration_seconds` | How long to run the benchmark load |
 | `warmup_skip_seconds` | Seconds of initial data to discard (cold-start filtering) |
@@ -183,6 +256,28 @@ For each **server binary** × **iteration**:
 12. **Cleanup** — Stop server, remove temp directory
 
 After all iterations for a server, compute **aggregate** with outlier filtering.
+
+### Remote (External) Server Flow
+
+For **remote servers** (`remote-server-info`), the flow is different:
+
+1. **Validate standalone mode** — Before the first iteration, run `redis-cli -h <endpoint> -p <port> INFO cluster` to verify the server is reachable
+2. **Each iteration starts with FLUSHALL** — `redis-cli -h <endpoint> -p <port> FLUSHALL` clears the keyspace
+3. **Pre-populate** — Same as local, but with `-h <endpoint>`
+4. **Benchmark** — All `amz_valkey-benchmark` processes connect to the remote server via `-h <endpoint> -p <port>`
+5. **No server start/stop** — The orchestrator does not manage the server lifecycle
+6. **No binary copy** — No `servers_directory` needed for remote-only configs
+
+| Aspect | Local Server | Remote Server |
+|--------|-------------|---------------|
+| Server startup | Orchestrator starts it | Skipped (validates reachability + standalone) |
+| FLUSHALL | Each iteration | Each iteration |
+| Pre-populate | `-p <port>` (localhost) | `-h <host> -p <port>` |
+| Benchmark | `-p <port>` (localhost) | `-h <host> -p <port>` |
+| Server shutdown | Orchestrator stops it | Skipped |
+| Binary checksum | Computed | Skipped (records remote endpoint) |
+| NUMA server pinning | Applied | Skipped (server is remote) |
+| `servers_directory` | Required | Not required |
 
 ### Server Lifecycle & Error Detection
 

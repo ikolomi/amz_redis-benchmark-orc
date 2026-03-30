@@ -148,9 +148,9 @@ def load_config(config_path: str) -> dict:
     with open(config_path) as f:
         config = json.load(f)
 
-    # Required fields
+    # Required fields (servers_directory is conditionally required below)
     required = [
-        "servers", "servers_directory", "amz_valkey_benchmark_binary",
+        "servers", "amz_valkey_benchmark_binary",
         "output_directory", "experiment_duration_seconds", "port",
         "keyspace", "clients", "iterations"
     ]
@@ -163,15 +163,61 @@ def load_config(config_path: str) -> dict:
     config.setdefault("description", "")
     config.setdefault("numa", {"enabled": False})
 
-    # Validate servers
+    # Validate servers — each must have exactly one of local-server-info or remote-server-info
     names = set()
+    has_local_server = False
     for srv in config["servers"]:
-        if "name" not in srv or "binary" not in srv:
-            raise ValueError("Each server must have 'name' and 'binary'")
+        if "name" not in srv:
+            raise ValueError("Each server must have 'name'")
         if srv["name"] in names:
             raise ValueError(f"Duplicate server name: '{srv['name']}'")
         names.add(srv["name"])
-        srv.setdefault("args", [])
+
+        has_local = "local-server-info" in srv
+        has_remote = "remote-server-info" in srv
+
+        # Backward compatibility: if 'binary' is present at top level, convert to local-server-info
+        if not has_local and not has_remote and "binary" in srv:
+            srv["local-server-info"] = {
+                "binary": srv.pop("binary"),
+                "args": srv.pop("args", []),
+            }
+            has_local = True
+
+        if has_local and has_remote:
+            raise ValueError(
+                f"Server '{srv['name']}' has both 'local-server-info' and "
+                f"'remote-server-info' — must have exactly one"
+            )
+        if not has_local and not has_remote:
+            raise ValueError(
+                f"Server '{srv['name']}' must have either 'local-server-info' "
+                f"(with 'binary') or 'remote-server-info' (with 'endpoint')"
+            )
+
+        if has_local:
+            has_local_server = True
+            local = srv["local-server-info"]
+            if "binary" not in local:
+                raise ValueError(
+                    f"Server '{srv['name']}': local-server-info must have 'binary'"
+                )
+            local.setdefault("args", [])
+
+        if has_remote:
+            remote = srv["remote-server-info"]
+            if "endpoint" not in remote:
+                raise ValueError(
+                    f"Server '{srv['name']}': remote-server-info must have 'endpoint'"
+                )
+            remote.setdefault("port", 6379)
+
+    # servers_directory is required only if there are local servers
+    if has_local_server and "servers_directory" not in config:
+        raise ValueError(
+            "Missing required config field: 'servers_directory' "
+            "(required when using local-server-info servers)"
+        )
 
     # Validate clients
     clients = config["clients"]
@@ -184,6 +230,39 @@ def load_config(config_path: str) -> dict:
         raise ValueError("max_connections_per_benchmark_process must be >= 1")
 
     return config
+
+
+def is_remote_server(server: dict) -> bool:
+    """Check if a server entry is a remote/external server."""
+    return "remote-server-info" in server
+
+
+def get_server_host(server: dict) -> Optional[str]:
+    """Get the host/endpoint for a server. Returns None for local servers (localhost)."""
+    if is_remote_server(server):
+        return server["remote-server-info"]["endpoint"]
+    return None
+
+
+def get_server_port(server: dict, default_port: int) -> int:
+    """Get the port for a server."""
+    if is_remote_server(server):
+        return server["remote-server-info"].get("port", 6379)
+    return default_port
+
+
+def get_server_binary(server: dict) -> Optional[str]:
+    """Get the binary path for a local server. Returns None for remote servers."""
+    if "local-server-info" in server:
+        return server["local-server-info"]["binary"]
+    return None
+
+
+def get_server_args(server: dict) -> List[str]:
+    """Get the extra args for a local server. Returns [] for remote servers."""
+    if "local-server-info" in server:
+        return server["local-server-info"].get("args", [])
+    return []
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -262,7 +341,8 @@ def prepare_server_directory(server: dict, servers_dir: str, run_id: str) -> Pat
     server_home = Path(servers_dir) / f"{server['name']}_{run_id}"
     server_home.mkdir(parents=True, exist_ok=True)
 
-    src_binary = Path(server["binary"])
+    binary_path = get_server_binary(server)
+    src_binary = Path(binary_path)
     if not src_binary.exists():
         raise FileNotFoundError(f"Server binary not found: {src_binary}")
 
@@ -276,7 +356,8 @@ def prepare_server_directory(server: dict, servers_dir: str, run_id: str) -> Pat
 def start_server(server: dict, server_home: Path, port: int, numa_config: dict,
                  log_path: Path) -> subprocess.Popen:
     """Start valkey-server and return the Popen handle."""
-    binary = server_home / Path(server["binary"]).name
+    binary_path = get_server_binary(server)
+    binary = server_home / Path(binary_path).name
     cmd = []
 
     if numa_config.get("enabled", False):
@@ -285,7 +366,7 @@ def start_server(server: dict, server_home: Path, port: int, numa_config: dict,
     cmd.append(str(binary))
     cmd.extend(["--port", str(port)])
     cmd.extend(["--dir", str(server_home)])
-    cmd.extend(server.get("args", []))
+    cmd.extend(get_server_args(server))
 
     # Log with proper quoting so empty args are visible in the log
     cmd_display = [f'"{c}"' if c == "" else c for c in cmd]
@@ -303,14 +384,24 @@ def start_server(server: dict, server_home: Path, port: int, numa_config: dict,
     return proc
 
 
-def wait_for_server_ready(port: int, timeout: float = 30.0, interval: float = 0.5) -> bool:
+def _redis_cli_cmd(host: Optional[str], port: int) -> List[str]:
+    """Build base redis-cli command with host and port."""
+    cmd = ["redis-cli"]
+    if host:
+        cmd.extend(["-h", host])
+    cmd.extend(["-p", str(port)])
+    return cmd
+
+
+def wait_for_server_ready(port: int, host: Optional[str] = None,
+                          timeout: float = 30.0, interval: float = 0.5) -> bool:
     """Wait for the server to respond to PING."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
+            cmd = _redis_cli_cmd(host, port) + ["PING"]
             result = subprocess.run(
-                ["redis-cli", "-p", str(port), "PING"],
-                capture_output=True, text=True, timeout=5
+                cmd, capture_output=True, text=True, timeout=5
             )
             if result.returncode == 0 and "PONG" in result.stdout:
                 return True
@@ -318,6 +409,57 @@ def wait_for_server_ready(port: int, timeout: float = 30.0, interval: float = 0.
             pass
         time.sleep(interval)
     return False
+
+
+def validate_standalone_server(host: str, port: int):
+    """Validate that a remote server is reachable and running in standalone mode.
+
+    Runs 'redis-cli -h <host> -p <port> INFO cluster' and checks:
+    - Server is reachable (command succeeds)
+    - cluster_enabled:0 (standalone mode, not cluster)
+
+    Raises RuntimeError if validation fails.
+    """
+    cmd = _redis_cli_cmd(host, port) + ["INFO", "cluster"]
+    display_addr = f"{host}:{port}"
+    logger.info("Validating remote server %s (standalone mode check)...", display_addr)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"Remote server {display_addr} did not respond within 10s. "
+            f"Check that the server is running and reachable."
+        )
+    except FileNotFoundError:
+        raise RuntimeError("redis-cli not found on PATH — required for server validation")
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Failed to connect to remote server {display_addr}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+
+    # Parse cluster_enabled from INFO cluster output - disabled for serverless, TODO: make configurable
+    # output = result.stdout
+    # for line in output.splitlines():
+    #     line = line.strip()
+    #     if line.startswith("cluster_enabled:"):
+    #         value = line.split(":")[1].strip()
+    #         if value == "0":
+    #             logger.info("Remote server %s validated: standalone mode, reachable",
+    #                         display_addr)
+    #             return
+    #         else:
+    #             raise RuntimeError(
+    #                 f"Remote server {display_addr} is running in cluster mode "
+    #                 f"(cluster_enabled:{value}). Only standalone mode is supported."
+    #             )
+
+    # raise RuntimeError(
+    #     f"Could not determine cluster mode for remote server {display_addr}. "
+    #     f"'cluster_enabled' not found in INFO cluster output."
+    # )
 
 
 def stop_server(proc: subprocess.Popen, timeout: float = 10.0):
@@ -336,12 +478,15 @@ def stop_server(proc: subprocess.Popen, timeout: float = 10.0):
             proc._log_fh.close()
 
 
-def flush_server(port: int):
+def flush_server(port: int, host: Optional[str] = None):
     """Run FLUSHALL on the server."""
-    subprocess.run(
-        ["redis-cli", "-p", str(port), "FLUSHALL"],
-        capture_output=True, text=True, timeout=10
-    )
+    cmd = _redis_cli_cmd(host, port) + ["FLUSHALL"]
+    logger.info("Running FLUSHALL on %s:%d", host or "localhost", port)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        logger.warning("FLUSHALL failed: %s", result.stderr.strip() or result.stdout.strip())
+    else:
+        logger.info("FLUSHALL complete")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -349,7 +494,7 @@ def flush_server(port: int):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def prepopulate_keys(benchmark_binary: str, port: int, keyspace: dict,
-                     numa_config: dict):
+                     numa_config: dict, host: Optional[str] = None):
     """Pre-populate the keyspace with SET commands so GETs don't all miss."""
     key_count = keyspace["key_count"]
     data_size = keyspace["data_size_bytes"]
@@ -359,8 +504,10 @@ def prepopulate_keys(benchmark_binary: str, port: int, keyspace: dict,
     if numa_config.get("enabled", False):
         cmd.extend(build_numa_prefix(numa_config.get("benchmark_node", 1)))
 
+    cmd.append(benchmark_binary)
+    if host:
+        cmd.extend(["-h", host])
     cmd.extend([
-        benchmark_binary,
         "-p", str(port),
         "-t", "set",
         "-n", str(key_count),
@@ -369,7 +516,8 @@ def prepopulate_keys(benchmark_binary: str, port: int, keyspace: dict,
         "-c", "50",
     ])
 
-    logger.info("Pre-populating %d keys (%d bytes)...", key_count, data_size)
+    logger.info("Pre-populating %d keys (%d bytes) on %s:%d...",
+                key_count, data_size, host or "localhost", port)
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if result.returncode != 0:
         raise RuntimeError(f"Pre-population failed: {result.stderr}")
@@ -384,7 +532,8 @@ def create_benchmark_process(benchmark_binary: str, port: int, command: str,
                              connections: int, keyspace: dict,
                              duration_seconds: int,
                              numa_config: dict, barrier_fifo: str,
-                             csv_path: Path, log_path: Path) -> subprocess.Popen:
+                             csv_path: Path, log_path: Path,
+                             host: Optional[str] = None) -> subprocess.Popen:
     """Create a single amz_valkey-benchmark process held at a FIFO barrier.
 
     The process blocks on `read < barrier_fifo` until the orchestrator
@@ -398,8 +547,10 @@ def create_benchmark_process(benchmark_binary: str, port: int, command: str,
 
     stdout_log_path = csv_path.with_suffix(".stdout.log")
 
-    bench_args = [
-        benchmark_binary,
+    bench_args = [benchmark_binary]
+    if host:
+        bench_args.extend(["-h", host])
+    bench_args.extend([
         "-p", str(port),
         "-t", command,
         "-c", str(connections),
@@ -408,7 +559,7 @@ def create_benchmark_process(benchmark_binary: str, port: int, command: str,
         "--test-duration", str(duration_seconds),
         "--interval-metrics-interval-duration-sec", "1",
         "--interval-metrics-path", str(csv_path),
-    ]
+    ])
     bench_cmd_str = " ".join(bench_args)
 
     # The full shell command:
@@ -887,17 +1038,21 @@ def validate_csv_output(csv_paths: List[Path]) -> List[str]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run_experiment(config: dict, output_root: Path):
-    """Run the full experiment: for each server × iteration."""
+    """Run the full experiment: for each server × iteration.
+
+    Supports both local servers (started/stopped by the orchestrator) and
+    remote/external servers (pre-existing, validated for standalone mode).
+    """
     servers = config["servers"]
     iterations = config["iterations"]
     duration = config["experiment_duration_seconds"]
     warmup_skip = config.get("warmup_skip_seconds", 5)
-    port = config["port"]
+    default_port = config["port"]
     keyspace = config["keyspace"]
     clients = config["clients"]
     numa = config.get("numa", {"enabled": False})
     benchmark_binary = config["amz_valkey_benchmark_binary"]
-    servers_dir = config["servers_directory"]
+    servers_dir = config.get("servers_directory")
     max_c = clients["max_connections_per_benchmark_process"]
     set_conns = clients["set_clients"]  # total SET connections
     get_conns = clients["get_clients"]  # total GET connections
@@ -914,10 +1069,14 @@ def run_experiment(config: dict, output_root: Path):
     config_copy = output_root / "experiment-config.json"
     config_copy.write_text(json.dumps(config, indent=2) + "\n")
 
-    # Binary checksums
+    # Binary checksums (only for local servers)
     checksums = {}
     for srv in servers:
-        checksums[srv["name"]] = sha256_file(srv["binary"])
+        binary = get_server_binary(srv)
+        if binary:
+            checksums[srv["name"]] = sha256_file(binary)
+        else:
+            checksums[srv["name"]] = f"remote:{get_server_host(srv)}:{get_server_port(srv, default_port)}"
     checksums["amz_valkey-benchmark"] = sha256_file(benchmark_binary)
     checksums_path = output_root / "binary_checksums.json"
     checksums_path.write_text(json.dumps(checksums, indent=2) + "\n")
@@ -933,10 +1092,20 @@ def run_experiment(config: dict, output_root: Path):
         numa_txt = output_root / "numa_topology.txt"
         numa_txt.write_text(get_numa_topology_text())
 
+    # Build server description strings for logging
+    server_descs = []
+    for s in servers:
+        if is_remote_server(s):
+            host = get_server_host(s)
+            p = get_server_port(s, default_port)
+            server_descs.append(f"{s['name']} (remote: {host}:{p})")
+        else:
+            server_descs.append(f"{s['name']} (local: {get_server_binary(s)})")
+
     logger.info("=" * 70)
     logger.info("Valkey Server Benchmark Experiment")
     logger.info("  Description: %s", config.get("description", ""))
-    logger.info("  Servers: %s", ", ".join(s["name"] for s in servers))
+    logger.info("  Servers: %s", ", ".join(server_descs))
     logger.info("  Iterations: %d", iterations)
     logger.info("  Duration: %ds per iteration", duration)
     logger.info("  Connections: %d SET + %d GET = %d total", set_conns, get_conns, total_conns)
@@ -950,8 +1119,19 @@ def run_experiment(config: dict, output_root: Path):
 
     for server in servers:
         server_name = server["name"]
+        remote = is_remote_server(server)
+        srv_host = get_server_host(server)       # None for local
+        srv_port = get_server_port(server, default_port)
+
         server_output = output_root / server_name
         server_output.mkdir(parents=True, exist_ok=True)
+
+        # For remote servers: validate standalone mode once before all iterations
+        if remote:
+            logger.info("")
+            logger.info("Validating remote server '%s' at %s:%d...",
+                        server_name, srv_host, srv_port)
+            validate_standalone_server(srv_host, srv_port)
 
         iteration_summaries = []
 
@@ -961,34 +1141,50 @@ def run_experiment(config: dict, output_root: Path):
             iter_dir.mkdir(parents=True, exist_ok=True)
 
             logger.info("")
-            logger.info("═══ %s — iteration %d/%d ═══", server_name, iteration, iterations)
+            if remote:
+                logger.info("═══ %s (%s:%d) — iteration %d/%d ═══",
+                            server_name, srv_host, srv_port, iteration, iterations)
+            else:
+                logger.info("═══ %s — iteration %d/%d ═══",
+                            server_name, iteration, iterations)
 
-            # 1. Prepare server directory
-            server_home = prepare_server_directory(server, servers_dir, run_id)
-            server_log = iter_dir / "server.log"
-
+            server_home = None
             server_proc = None
             mpstat_proc = None
             bench_procs = []
             barrier_dir = None
 
             try:
-                # 2. Start server
-                server_proc = start_server(server, server_home, port, numa, server_log)
-                if not wait_for_server_ready(port):
-                    raise RuntimeError(f"Server {server_name} failed to start within 30s")
-                logger.info("Server ready on port %d (PID %d)", port, server_proc.pid)
+                if remote:
+                    # Remote server: no start/stop, just validate it's still up
+                    if not wait_for_server_ready(srv_port, host=srv_host, timeout=10):
+                        raise RuntimeError(
+                            f"Remote server {server_name} ({srv_host}:{srv_port}) "
+                            f"is not responding at iteration {iteration}"
+                        )
+                    logger.info("Remote server %s:%d is ready", srv_host, srv_port)
+                else:
+                    # Local server: prepare directory, start, wait for ready
+                    server_home = prepare_server_directory(server, servers_dir, run_id)
+                    server_log = iter_dir / "server.log"
+                    server_proc = start_server(server, server_home, srv_port, numa, server_log)
+                    if not wait_for_server_ready(srv_port):
+                        raise RuntimeError(
+                            f"Server {server_name} failed to start within 30s"
+                        )
+                    logger.info("Server ready on port %d (PID %d)", srv_port, server_proc.pid)
 
-                # 3. Flush and pre-populate
-                flush_server(port)
-                prepopulate_keys(benchmark_binary, port, keyspace, numa)
+                # Flush and pre-populate (for both local and remote)
+                flush_server(srv_port, host=srv_host)
+                prepopulate_keys(benchmark_binary, srv_port, keyspace, numa,
+                                 host=srv_host)
 
-                # 4. Create FIFO barrier
+                # Create FIFO barrier
                 barrier_dir = tempfile.mkdtemp(prefix="vbench-barrier-")
                 barrier_fifo = os.path.join(barrier_dir, "barrier")
                 os.mkfifo(barrier_fifo)
 
-                # 5. Create all benchmark processes (held at barrier)
+                # Create all benchmark processes (held at barrier)
                 csv_paths = []  # (command_type, csv_path)
                 log_paths = []
 
@@ -996,8 +1192,9 @@ def run_experiment(config: dict, output_root: Path):
                     csv_path = iter_dir / f"benchmark-set-{proc_idx:02d}.csv"
                     log_path = iter_dir / f"benchmark-set-{proc_idx:02d}.log"
                     proc = create_benchmark_process(
-                        benchmark_binary, port, "set", set_conns_per_proc,
-                        keyspace, duration, numa, barrier_fifo, csv_path, log_path
+                        benchmark_binary, srv_port, "set", set_conns_per_proc,
+                        keyspace, duration, numa, barrier_fifo, csv_path, log_path,
+                        host=srv_host
                     )
                     bench_procs.append(proc)
                     csv_paths.append(("set", csv_path))
@@ -1007,8 +1204,9 @@ def run_experiment(config: dict, output_root: Path):
                     csv_path = iter_dir / f"benchmark-get-{proc_idx:02d}.csv"
                     log_path = iter_dir / f"benchmark-get-{proc_idx:02d}.log"
                     proc = create_benchmark_process(
-                        benchmark_binary, port, "get", get_conns_per_proc,
-                        keyspace, duration, numa, barrier_fifo, csv_path, log_path
+                        benchmark_binary, srv_port, "get", get_conns_per_proc,
+                        keyspace, duration, numa, barrier_fifo, csv_path, log_path,
+                        host=srv_host
                     )
                     bench_procs.append(proc)
                     csv_paths.append(("get", csv_path))
@@ -1020,30 +1218,28 @@ def run_experiment(config: dict, output_root: Path):
                 # Small delay to let all processes reach the barrier read
                 time.sleep(0.5)
 
-                # 6. Start mpstat
+                # Start mpstat
                 mpstat_path = iter_dir / "mpstat.log"
                 mpstat_proc = start_mpstat(mpstat_path)
 
-                # 7. Release barrier — all benchmarks start simultaneously
+                # Release barrier — all benchmarks start simultaneously
                 release_barrier(barrier_fifo, total_procs)
                 start_time = time.time()
                 logger.info("Benchmark load started — running for %ds "
                             "(processes will self-exit via --test-duration)...", duration)
 
-                # 8. Wait for all benchmark processes to exit naturally.
-                #    --test-duration ensures clean exit. We add generous timeout
-                #    for connection establishment overhead at high client counts.
+                # Wait for all benchmark processes to exit naturally
                 wait_timeout = duration + 120  # extra time for connection setup + cleanup
                 wait_for_benchmark_processes(bench_procs, timeout=wait_timeout)
 
                 elapsed = time.time() - start_time
                 logger.info("All benchmark processes finished (%.1fs elapsed)", elapsed)
 
-                # 9. Stop mpstat
+                # Stop mpstat
                 stop_mpstat(mpstat_proc)
                 mpstat_proc = None
 
-                # 10. Validate
+                # Validate
                 all_csv_paths = [p for _, p in csv_paths]
                 csv_errors = validate_csv_output(all_csv_paths)
                 log_errors = validate_benchmark_logs(log_paths)
@@ -1060,7 +1256,7 @@ def run_experiment(config: dict, output_root: Path):
                             f"Process {bp.pid} exited with code {bp.returncode}"
                         )
 
-                # 11. Compute iteration summary
+                # Compute iteration summary
                 summary = compute_iteration_summary(
                     csv_paths, warmup_skip, iteration, server_name,
                     mpstat_path, config
@@ -1094,7 +1290,7 @@ def run_experiment(config: dict, output_root: Path):
                 raise
 
             finally:
-                # Cleanup
+                # Cleanup benchmark processes
                 for bp in bench_procs:
                     if bp.poll() is None:
                         try:
@@ -1110,6 +1306,7 @@ def run_experiment(config: dict, output_root: Path):
                 if mpstat_proc and mpstat_proc.poll() is None:
                     stop_mpstat(mpstat_proc)
 
+                # Stop local server (remote servers are not managed)
                 if server_proc:
                     stop_server(server_proc)
 
@@ -1117,8 +1314,9 @@ def run_experiment(config: dict, output_root: Path):
                 if barrier_dir:
                     shutil.rmtree(barrier_dir, ignore_errors=True)
 
-                # Clean up server home
-                shutil.rmtree(str(server_home), ignore_errors=True)
+                # Clean up local server home directory
+                if server_home:
+                    shutil.rmtree(str(server_home), ignore_errors=True)
 
         # Compute aggregate for this server
         if iteration_summaries:
@@ -1249,9 +1447,16 @@ def main():
         print(f"  Description: {config.get('description', '')}")
         print(f"  Servers:")
         for srv in config["servers"]:
-            print(f"    - {srv['name']}: {srv['binary']}")
-            if srv.get("args"):
-                print(f"      args: {' '.join(srv['args'])}")
+            if is_remote_server(srv):
+                host = get_server_host(srv)
+                port = get_server_port(srv, config["port"])
+                print(f"    - {srv['name']}: remote → {host}:{port}")
+            else:
+                binary = get_server_binary(srv)
+                args_list = get_server_args(srv)
+                print(f"    - {srv['name']}: local → {binary}")
+                if args_list:
+                    print(f"      args: {' '.join(args_list)}")
         print(f"  Benchmark: {config['amz_valkey_benchmark_binary']}")
         print(f"  Iterations: {config['iterations']}")
         print(f"  Duration: {config['experiment_duration_seconds']}s per iteration")

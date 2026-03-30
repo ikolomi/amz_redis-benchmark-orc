@@ -57,6 +57,18 @@ def load_matrix_config(matrix_path: str) -> dict:
         if req not in clients:
             raise ValueError(f"experiment_template.clients must contain '{req}'")
 
+    # Validate servers: each must have local-server-info, remote-server-info, or legacy binary
+    has_local = False
+    for srv in template.get("servers", []):
+        if "local-server-info" in srv or "binary" in srv:
+            has_local = True
+    # servers_directory only required if there are local servers
+    if has_local and "servers_directory" not in template:
+        raise ValueError(
+            "experiment_template must contain 'servers_directory' "
+            "when using local-server-info servers"
+        )
+
     return config
 
 
@@ -288,7 +300,12 @@ def main():
         print(f"  Description: {matrix_config['description']}")
         print(f"  Servers:")
         for srv in template["servers"]:
-            print(f"    - {srv['name']}: {srv['binary']}")
+            if "remote-server-info" in srv:
+                ri = srv["remote-server-info"]
+                print(f"    - {srv['name']}: remote → {ri['endpoint']}:{ri.get('port', 6379)}")
+            else:
+                binary = srv.get("binary") or (srv.get("local-server-info", {}).get("binary", "?"))
+                print(f"    - {srv['name']}: local → {binary}")
         print(f"  Scale: {scale_values}")
         print(f"  Base: {base_set} SET + {base_get} GET = {base_set + base_get} connections")
         print(f"  Max connections per process: {max_c}")

@@ -2,13 +2,12 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/resp-bench/schemas/valkey-server-benchmark/experiment-config.schema.json",
   "title": "Valkey Server Benchmark — Experiment Configuration",
-  "description": "Configuration for a single benchmark experiment comparing valkey-server binaries using amz_valkey-benchmark as the load generator.",
+  "description": "Configuration for a single benchmark experiment comparing valkey-server binaries (local or remote) using amz_valkey-benchmark as the load generator.",
   "type": "object",
   "required": [
     "description",
     "iterations",
     "servers",
-    "servers_directory",
     "amz_valkey_benchmark_binary",
     "output_directory",
     "experiment_duration_seconds",
@@ -28,7 +27,7 @@
     },
     "servers": {
       "type": "array",
-      "description": "Array of server binaries to benchmark",
+      "description": "Array of servers to benchmark (local binaries or remote endpoints)",
       "minItems": 1,
       "items": {
         "$ref": "#/definitions/server"
@@ -36,7 +35,7 @@
     },
     "servers_directory": {
       "type": "string",
-      "description": "Directory where isolated per-run server home directories are created. The server binary is copied here to provide isolation."
+      "description": "Directory where isolated per-run server home directories are created. Required when using local-server-info servers."
     },
     "amz_valkey_benchmark_binary": {
       "type": "string",
@@ -59,7 +58,7 @@
     },
     "port": {
       "type": "integer",
-      "description": "Port for the valkey-server to listen on",
+      "description": "Default port for local servers to listen on. Remote servers define their own port in remote-server-info.",
       "minimum": 1,
       "maximum": 65535,
       "default": 6379
@@ -78,25 +77,62 @@
   "definitions": {
     "server": {
       "type": "object",
-      "description": "A valkey-server binary to benchmark",
-      "required": ["name", "binary"],
+      "description": "A server to benchmark — either a local binary (local-server-info) or a remote endpoint (remote-server-info). Exactly one must be specified.",
+      "required": ["name"],
       "properties": {
         "name": {
           "type": "string",
           "description": "Unique human-readable name for this server (used in output directories and graphs)",
           "pattern": "^[a-zA-Z0-9._-]+$"
         },
+        "local-server-info": {
+          "$ref": "#/definitions/local-server-info"
+        },
+        "remote-server-info": {
+          "$ref": "#/definitions/remote-server-info"
+        }
+      },
+      "oneOf": [
+        { "required": ["local-server-info"] },
+        { "required": ["remote-server-info"] }
+      ],
+      "additionalProperties": false
+    },
+    "local-server-info": {
+      "type": "object",
+      "description": "Configuration for a locally-managed server. The orchestrator starts and stops this server for each iteration.",
+      "required": ["binary"],
+      "properties": {
         "binary": {
           "type": "string",
-          "description": "Full path to the valkey-server binary"
+          "description": "Full path to the valkey-server / redis-server binary"
         },
         "args": {
           "type": "array",
-          "description": "Additional command-line arguments for valkey-server (e.g. ['--save', '', '--appendonly', 'no']). Port is always added automatically.",
+          "description": "Additional command-line arguments for the server (e.g. ['--save', '', '--appendonly', 'no']). Port is always added automatically.",
           "items": {
             "type": "string"
           },
           "default": []
+        }
+      },
+      "additionalProperties": false
+    },
+    "remote-server-info": {
+      "type": "object",
+      "description": "Configuration for a pre-existing remote server. The orchestrator validates it is reachable and in standalone mode before benchmarking. FLUSHALL is run at the start of each iteration.",
+      "required": ["endpoint"],
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "description": "DNS name or IP address of the remote Redis/Valkey server"
+        },
+        "port": {
+          "type": "integer",
+          "description": "Port of the remote server. Default: 6379",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 6379
         }
       },
       "additionalProperties": false
@@ -148,7 +184,7 @@
     },
     "numa": {
       "type": "object",
-      "description": "NUMA pinning configuration. When enabled, the server and benchmark processes are pinned to separate NUMA nodes for low-variance results.",
+      "description": "NUMA pinning configuration. When enabled, benchmark processes are pinned to the benchmark_node. For local servers, the server process is pinned to the server_node. For remote servers, only benchmark pinning applies.",
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -157,7 +193,7 @@
         },
         "server_node": {
           "type": "integer",
-          "description": "NUMA node for the valkey-server process",
+          "description": "NUMA node for local valkey-server processes (ignored for remote servers)",
           "minimum": 0,
           "default": 0
         },

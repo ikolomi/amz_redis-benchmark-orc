@@ -1,0 +1,38 @@
+{
+    "description": "Run 3 iterations against a remote server",
+    "iterations": 3,
+
+    "servers": [
+        {
+            "name": "remote-server",
+            "remote-server-info": {
+                "endpoint": "change.to.your.valkey.dns",
+                "port": 6379
+            }
+        }
+    ],
+
+    "amz_valkey_benchmark_binary": "/home/ubuntu/amz_redis-benchmark-orc/amz_valkey-benchmark",
+    "output_directory": "./results/remote-server-benchmark",
+
+    "experiment_duration_seconds": 20,
+    "warmup_skip_seconds": 5,
+    "port": 6379,
+
+    "keyspace": {
+        "key_count": 100000,
+        "data_size_bytes": 512,
+        "seed": 100000
+    },
+
+    "clients": {
+        "max_connections_per_benchmark_process": 16,
+        "set_clients": 20,
+        "get_clients": 40
+    },
+    "numa": {
+        "enabled": false,
+        "server_node": 0,
+        "benchmark_node": 1
+    }
+}
