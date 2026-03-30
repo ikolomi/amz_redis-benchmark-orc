@@ -184,6 +184,19 @@ For each **server binary** × **iteration**:
 
 After all iterations for a server, compute **aggregate** with outlier filtering.
 
+### Server Lifecycle & Error Detection
+
+**Server startup**: After launching valkey-server, the orchestrator polls with `redis-cli PING` for up to 30 seconds. If the server does not respond with `PONG` within this window, the run **fails immediately** with a `RuntimeError` — the error is logged, saved to `error.txt` in the iteration directory, and the exception propagates up to abort the experiment.
+
+**Server shutdown between iterations**: At the end of each iteration (in the `finally` block, so it runs even on failure):
+1. All benchmark processes are force-killed (`SIGKILL` via process group) if still running
+2. mpstat is stopped
+3. The server is stopped via `SIGTERM` with a 10-second grace period
+4. If the server doesn't exit within 10 seconds, `SIGKILL` is sent
+5. The barrier FIFO and isolated server home directory are cleaned up
+
+This ensures no zombie processes or port conflicts between iterations.
+
 ### FIFO Barrier (Zero-Skew Launch)
 
 All amz_valkey-benchmark processes are created first, each blocking on `read < /tmp/barrier_fifo`. Once all processes are created, the orchestrator writes to the FIFO, unblocking them simultaneously. This prevents load skew where early processes generate traffic while later ones are still starting.
