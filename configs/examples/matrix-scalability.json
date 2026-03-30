@@ -1,0 +1,42 @@
+{
+    "description": "Valkey 8.1 vs 9.0 — scalability sweep (base: 1 SET + 1 GET, scaled x1..x4)",
+    "dimensions": {
+        "scale": [1, 2, 4]
+    },
+    "experiment_template": {
+        "iterations": 3,
+        "servers": [
+            {
+                "name": "valkey-8.1-oss",
+                "binary": "/home/ANT.AMAZON.COM/ikolomin/valkey/valkey-server-8.1.0",
+                "args": ["--save", "", "--appendonly", "no", "--protected-mode", "no", "--loglevel", "warning"]
+            },
+            {
+                "name": "valkey-9.0-oss",
+                "binary": "/home/ANT.AMAZON.COM/ikolomin/valkey/valkey-server-9.0.0",
+                "args": ["--save", "", "--appendonly", "no", "--protected-mode", "no", "--loglevel", "warning"]
+            }
+        ],
+        "servers_directory": "/tmp/valkey-bench-servers",
+        "amz_valkey_benchmark_binary": "/usr/local/bin/amz_valkey-benchmark",
+        "output_directory": "./results/server-matrix",
+        "experiment_duration_seconds": 15,
+        "warmup_skip_seconds": 5,
+        "port": 6379,
+        "keyspace": {
+            "key_count": 100000,
+            "data_size_bytes": 512,
+            "seed": 100000
+        },
+        "clients": {
+            "set_clients": 1,
+            "get_clients": 1,
+            "max_connections_per_benchmark_process": 50
+        },
+        "numa": {
+            "enabled": false,
+            "server_node": 0,
+            "benchmark_node": 1
+        }
+    }
+}

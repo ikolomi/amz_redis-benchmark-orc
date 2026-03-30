@@ -1,0 +1,174 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/resp-bench/schemas/valkey-server-benchmark/experiment-config.schema.json",
+  "title": "Valkey Server Benchmark — Experiment Configuration",
+  "description": "Configuration for a single benchmark experiment comparing valkey-server binaries using amz_valkey-benchmark as the load generator.",
+  "type": "object",
+  "required": [
+    "description",
+    "iterations",
+    "servers",
+    "servers_directory",
+    "amz_valkey_benchmark_binary",
+    "output_directory",
+    "experiment_duration_seconds",
+    "port",
+    "keyspace",
+    "clients"
+  ],
+  "properties": {
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of this experiment"
+    },
+    "iterations": {
+      "type": "integer",
+      "description": "Number of iterations to run per server binary",
+      "minimum": 1
+    },
+    "servers": {
+      "type": "array",
+      "description": "Array of server binaries to benchmark",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/definitions/server"
+      }
+    },
+    "servers_directory": {
+      "type": "string",
+      "description": "Directory where isolated per-run server home directories are created. The server binary is copied here to provide isolation."
+    },
+    "amz_valkey_benchmark_binary": {
+      "type": "string",
+      "description": "Full path to the amz_valkey-benchmark binary"
+    },
+    "output_directory": {
+      "type": "string",
+      "description": "Base output directory. A timestamped subdirectory is created per invocation."
+    },
+    "experiment_duration_seconds": {
+      "type": "integer",
+      "description": "Duration in seconds to run the benchmark load. amz_valkey-benchmark runs with --test-duration and exits cleanly after this duration.",
+      "minimum": 1
+    },
+    "warmup_skip_seconds": {
+      "type": "number",
+      "description": "Number of seconds of initial data to discard from metrics (cold-start filtering). Default: 5",
+      "minimum": 0,
+      "default": 5
+    },
+    "port": {
+      "type": "integer",
+      "description": "Port for the valkey-server to listen on",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 6379
+    },
+    "keyspace": {
+      "$ref": "#/definitions/keyspace"
+    },
+    "clients": {
+      "$ref": "#/definitions/clients"
+    },
+    "numa": {
+      "$ref": "#/definitions/numa"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "server": {
+      "type": "object",
+      "description": "A valkey-server binary to benchmark",
+      "required": ["name", "binary"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique human-readable name for this server (used in output directories and graphs)",
+          "pattern": "^[a-zA-Z0-9._-]+$"
+        },
+        "binary": {
+          "type": "string",
+          "description": "Full path to the valkey-server binary"
+        },
+        "args": {
+          "type": "array",
+          "description": "Additional command-line arguments for valkey-server (e.g. ['--save', '', '--appendonly', 'no']). Port is always added automatically.",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    },
+    "keyspace": {
+      "type": "object",
+      "description": "Key generation and data configuration",
+      "required": ["key_count", "data_size_bytes"],
+      "properties": {
+        "key_count": {
+          "type": "integer",
+          "description": "Number of random keys (-r parameter for amz_valkey-benchmark). Controls the keyspace size.",
+          "minimum": 1
+        },
+        "data_size_bytes": {
+          "type": "integer",
+          "description": "Size of SET values in bytes (-d parameter)",
+          "minimum": 1
+        },
+        "seed": {
+          "type": "integer",
+          "description": "Random seed for amz_valkey-benchmark (-r uses this as the range). Default: same as key_count."
+        }
+      },
+      "additionalProperties": false
+    },
+    "clients": {
+      "type": "object",
+      "description": "Client connection configuration. set_clients and get_clients are total TCP connections for SET and GET workloads. The orchestrator computes the number of amz_valkey-benchmark processes internally using max_connections_per_benchmark_process.",
+      "required": ["max_connections_per_benchmark_process", "set_clients", "get_clients"],
+      "properties": {
+        "max_connections_per_benchmark_process": {
+          "type": "integer",
+          "description": "Maximum connections per amz_valkey-benchmark process (-c parameter). Processes are split so each has at most this many connections.",
+          "minimum": 1
+        },
+        "set_clients": {
+          "type": "integer",
+          "description": "Total TCP connections for SET workload. Processes are computed as ceil(set_clients / max_connections_per_benchmark_process).",
+          "minimum": 0
+        },
+        "get_clients": {
+          "type": "integer",
+          "description": "Total TCP connections for GET workload. Processes are computed as ceil(get_clients / max_connections_per_benchmark_process).",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "numa": {
+      "type": "object",
+      "description": "NUMA pinning configuration. When enabled, the server and benchmark processes are pinned to separate NUMA nodes for low-variance results.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable NUMA pinning. Default: false",
+          "default": false
+        },
+        "server_node": {
+          "type": "integer",
+          "description": "NUMA node for the valkey-server process",
+          "minimum": 0,
+          "default": 0
+        },
+        "benchmark_node": {
+          "type": "integer",
+          "description": "NUMA node for the amz_valkey-benchmark processes",
+          "minimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+    "description": "Valkey 8.1-ec/9.0-ec — scalability sweep (base: 256 SET + 256 GET, no scale)",
+    "dimensions": {
+        "scale": [1]
+    },
+    "experiment_template": {
+        "iterations": 3,
+        "servers": [
+            {
+                "name": "valkey-8.1",
+                "binary": "/home/ubuntu/valkey-bench/c7a.metal-48xl/valkey-server-ec-8.1.x",
+                "args": ["--save", "", "--appendonly", "no", "--protected-mode", "no", "--loglevel", "warning", "--io-threads", "16"]
+            },
+            {
+                "name": "valkey-9.0",
+                "binary": "/home/ubuntu/valkey-bench/c7a.metal-48xl/valkey-server-ec-9..0",
+                "args": ["--save", "", "--appendonly", "no", "--protected-mode", "no", "--loglevel", "warning", "--io-threads", "16"]
+            }
+        ],
+        "servers_directory": "/tmp/valkey-bench-servers",
+        "amz_valkey_benchmark_binary": "/home/ubuntu/valkey-bench/c7a.metal-48xl/amz_valkey-benchmark",
+        "output_directory": "./results/server-matrix",
+        "experiment_duration_seconds": 20,
+        "warmup_skip_seconds": 5,
+        "port": 6379,
+        "keyspace": {
+            "key_count": 100000,
+            "data_size_bytes": 512,
+            "seed": 100000
+        },
+        "clients": {
+            "set_clients": 256,
+            "get_clients": 256,
+            "max_connections_per_benchmark_process": 16
+        },
+        "numa": {
+            "enabled": false,
+            "server_node": 0,
+            "benchmark_node": 1
+        }
+    }
+}
