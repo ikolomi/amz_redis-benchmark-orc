@@ -490,7 +490,7 @@ def find_cli_path():
     which_redis_cli = shutil.which("redis-cli")
     which_valkey_cli = shutil.which("valkey-cli")
     if which_redis_cli is None and which_valkey_cli is None:
-        raise RuntimeError("redis-cli not found on PATH — required for server validation")
+        raise RuntimeError("redis-cli/valkey-cli not found on PATH — required for server validation")
     return which_redis_cli or which_valkey_cli
 
 
